@@ -1,0 +1,143 @@
+name: test-dotnet-template
+
+on:
+  workflow_call:
+    inputs:
+      ADDITIONALRUNNERLABEL:
+        description: 'Add runner label'
+        required: false
+        default: "linux"
+        type: string
+      ADDITIONALRUNNERLABEL2:
+        description: 'Add second runner label'
+        required: false
+        default: "research"
+        type: string
+    secrets:
+      VAULT_URL:
+        description: 'Vault url'
+        required: true
+      VAULT_TOKEN:
+        description: 'Vault access token'
+        required: true
+      HES_GITHUB_PAT:
+        required: true
+      HES_SONARQUBE_URL:
+        required: true
+      HES_SONAR_CREDS_PSW:
+        required: true
+      HES_SONAR_CREDS_USR:
+        required: true
+      HES_DOCKER_USERNAME:
+        required: true
+      HES_DOCKER_PASSWORD:
+        required: true
+      HES_FORTIFY_TOKEN:
+        required: true
+      
+      
+        
+env:
+  REPONAME: ${{ github.event.repository.name }}
+  WORKSPACE: ${{ github.workspace }}
+  HES_GITHUB_PAT: ${{ secrets.HES_GITHUB_PAT }}
+  HES_SONARQUBE_URL: ${{ secrets.HES_SONAR_URL }}
+  HES_SONAR_CREDS_PSW: ${{ secrets.HES_SONAR_PASSWORD}}
+  HES_SONAR_CREDS_USR: ${{ secrets.HES_SONAR_USERNAME}}
+  HES_DOCKER_USERNAME: ${{ secrets.HES_CF_USERNAME }}   
+  HES_FORTIFY_TOKEN: ${{ secrets.HES_FORTIFY_TOKEN }}
+  HES_FORTIFY_API_TOKEN: ${{ secrets.HES_FORTIFY_API_TOKEN }}
+  HES_SONAR_TOKEN: ${{ secrets.HES_SONAR_TOKEN}}
+
+
+  
+  
+
+jobs:
+  dotnet-test:
+    name: dotnet-test
+    runs-on:  [self-hosted, '${{ inputs.ADDITIONALRUNNERLABEL }}', '${{ inputs.ADDITIONALRUNNERLABEL2 }}']
+    container:
+       image: docker.na1.hsdp.io/lumify/dev/hes/sonaradd:v1.0.0
+       credentials:
+         username: ${{ secrets.HES_DOCKER_USERNAME }}
+         password: ${{ secrets.HES_DOCKER_PASSWORD }}
+        
+    
+        
+    steps:
+     - name: Import Vault Secrets
+       id: secrets
+       uses: hashicorp/vault-action@v2.4.0
+       with:
+          url: ${{ secrets.VAULT_URL }}
+          method: token
+          secrets: |
+            hes-ae/data/hesae GITHUB_PAT_TOKEN | GITHUB_PAT_TOKEN
+          token: ${{ secrets.VAULT_TOKEN }}
+          tlsSkipVerify: true # optional, default is false
+
+     - name: Checkout with submodules
+       uses: actions/checkout@v2
+       with:
+         submodules: recursive
+         token: ${{ env.GITHUB_PAT_TOKEN }}
+         
+     - name: Checkout CI scripts
+       uses: actions/checkout@v2.3.4
+       with:
+          repository: philips-internal/hes-ae-github-workflows
+          ref: sonar-fortify 
+          path: CI_Scripts
+          token: ${{ env.HES_GITHUB_PAT }}
+         
+
+     - name: Setup dotnet
+       uses: actions/setup-dotnet@v1
+       with:
+         dotnet-version: |
+           5.0.x
+           6.0.x
+           
+     - name: Set up JDK 1.8
+       uses: actions/setup-java@v1
+       with:
+          java-version: 1.8     
+           
+
+     - name: Run develop build and fail on warnings
+       if: ${{ github.ref_name == 'develop' && hashFiles('./src/*.csproj') != '' }}
+       working-directory: ./src
+       run: |
+          ${{ env.DOTNET_ROOT }}/dotnet publish -c:release -warnaserror -nowarn:'SA0001;CS0618'
+     - name: Run master build and fail on warnings
+       if: ${{ github.ref_name == 'master' && hashFiles('./src/*.csproj') != '' }}
+       working-directory: ./src
+       run: |
+          ${{ env.DOTNET_ROOT }}/dotnet publish -c:release -warnaserror -nowarn:'SA0001;CS0618'
+           
+     - name: Run dotnet test
+       if: hashFiles('test/*') != ''
+       run: |
+           ${{ env.DOTNET_ROOT }}/dotnet test /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput='./TestResults/' /p:Include="[*]service.area*" /p:Exclude="[*]service.area.initialization*%2c[*]service.area.Startup*%2c[*]service.area.Program*" test/test.service.area.csproj
+     
+           
+     - name: Sonar-Scan
+       working-directory: ./src
+       run: |
+           dotnet tool install --global dotnet-sonarscanner --version 5.5.3
+           export PATH="$PATH:/root/.dotnet/tools:/github/home/.dotnet/tools"
+           dotnet sonarscanner begin /k:"sig-$REPONAME" /d:sonar.host.url="https://sonarqube-pic.ta.philips.com/sonar" /d:sonar.login="a83bb2b1e04452cfd39096cca2a39b6397a8c7a2" /d:sonar.cs.opencover.reportsPaths=$WORKSPACE/test/TestResults/coverage.opencover.xml
+           dotnet build
+           dotnet sonarscanner end /d:sonar.login="a83bb2b1e04452cfd39096cca2a39b6397a8c7a2"
+          
+     - name: Fortify-Scan
+       run: |
+         export PATH="$PATH:/opt/Fortify/Fortify_SCA_and_Apps_21.1.0/bin"
+         bash CI_Scripts/cicd-action-scripts/fortifyscan-hes.sh $REPONAME $HES_FORTIFY_TOKEN $HES_GITHUB_PAT
+         
+     - name: Fortify-Gate
+       run: |
+         bash CI_Scripts/cicd-action-scripts/fortifygatescript-hes.sh 15250 
+          
+ 
